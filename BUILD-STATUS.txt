@@ -1,0 +1,23 @@
+Zarnegar v61 AI Fusion XAUUSD
+
+Static checks completed in this environment:
+- JavaScript syntax: PASS (node --check)
+- Python MT5 + AI bridge syntax: PASS (py_compile)
+- AI degraded-mode smoke test: PASS
+- Android XML parse: PASS
+- HTML parse: PASS
+- App icon resources: READY
+- Native JSON import/save pickers: READY
+- Separate Android AI network executor: ADDED
+- Chronos-2 provider adapter: ADDED (optional dependency/model download required)
+- TimesFM 2.5 provider adapter: ADDED (optional dependency/model download required)
+- AI Fusion consensus + regime gate: ADDED
+- AI freshness + strength gates: ADDED
+- v59 -> v61 local-state migration: ADDED
+- Real order-send endpoint: ABSENT / READ-ONLY
+- Android project structure: READY for Android Studio / Gradle
+
+An installable APK was not compiled in this runtime because Android SDK/build tools are not installed here.
+Use Android Studio Build > Build APK(s), or the included GitHub Actions workflow.
+
+Important: AI Strength is not a win probability. The 90% target remains a validation goal only and is not guaranteed.

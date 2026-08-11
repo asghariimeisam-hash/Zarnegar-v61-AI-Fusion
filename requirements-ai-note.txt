@@ -1,0 +1,17 @@
+Zarnegar v61 AI providers
+
+Chronos-2:
+  pip install -r requirements-ai-chronos.txt
+
+TimesFM 2.5:
+  Follow the official Google Research TimesFM installation instructions and install the repository with the PyTorch extra.
+  The bridge detects the `timesfm` Python module automatically.
+
+Environment switches:
+  ZARNEGAR_AI_PROVIDERS=chronos2,timesfm25
+  ZARNEGAR_AI_FORCE_CPU=1
+  ZARNEGAR_AI_HORIZON=6
+  ZARNEGAR_AI_CONTEXT=512
+  ZARNEGAR_AI_CACHE_SEC=30
+
+The first model load may download model weights and can take time. AI endpoints are prediction-only; no order_send path exists.
