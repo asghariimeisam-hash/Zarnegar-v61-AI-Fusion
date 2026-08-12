@@ -1,0 +1,33 @@
+plugins { id 'com.android.application' }
+
+android {
+    namespace 'com.zarnegar.privatepro'
+    compileSdk 35
+    defaultConfig {
+        applicationId 'com.zarnegar.privatepro'
+        minSdk 23
+        targetSdk 35
+        versionCode 611
+        versionName '6.1.1'
+    }
+    buildTypes {
+        debug { minifyEnabled false }
+        release {
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt')
+        }
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+    buildFeatures { buildConfig false }
+}
+
+tasks.register('copyWebAssets', Copy) {
+    from(rootDir) {
+        include 'index-v61.html', 'index.html', 'zarnegar-v61.js', 'dashboard-v61.css', 'manifest.json'
+    }
+    into layout.projectDirectory.dir('src/main/assets')
+}
+preBuild.dependsOn copyWebAssets
