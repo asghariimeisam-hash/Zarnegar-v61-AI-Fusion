@@ -1,71 +1,60 @@
-# Zarnegar v61 Personal XAUUSD — AI Fusion Edition
+# Zarnegar v61 Apex — Online Institutional XAUUSD
 
-نسخه شخصی زرنگار برای XAUUSD با لایه پیش‌بینی پیشرفته و Shadow Validation.
+نسخه Apex زرنگار: ترمینال زنده طلا + کمیته هوش مصنوعی ۸ میزه. سفارش واقعی ارسال نمی‌شود.
 
-## معماری AI
+## چه چیزی آنلاین شد؟
 
-زرنگار v61 از یک معماری **Fusion** استفاده می‌کند، نه یک مدل واحد:
+حالت پیش‌فرض **Online Apex • Live Gold** است و بدون MetaTrader کار می‌کند:
 
-1. **Amazon Chronos-2** — مدل Foundation برای پیش‌بینی سری زمانی.
-2. **Google TimesFM 2.5** — مدل Foundation دوم برای تنوع پیش‌بینی.
-3. **MTF Technical Engine** — H1/M15/M5، EMA، RSI، ATR، Structure و Spread.
-4. **Regime Filter** — تشخیص Trend/Range و جلوگیری از اجبار به معامله.
-5. **Consensus Gate** — اگر مدل‌ها اختلاف داشته باشند یا با جهت تکنیکال هم‌جهت نباشند، خروجی `WAIT / NO TRADE` می‌شود.
+1. **فید زنده XAUUSD** از Swissquote BBO، Gold API، XAUS و CoinGecko.
+2. **Apex Quant Fusion** — هشت میز تخصصی (Trend, Momentum, Structure, Volatility, Liquidity, Mean-Revert, Session, Flow).
+3. **وتوی اختلاف** — اگر Trend و Structure خلاف هم باشند یا اکثریت شکل نگیرد، خروجی `WAIT` است.
+4. **Chronos-2 و TimesFM 2.5** همچنان بوستر اختیاری روی PC دارای MT5 هستند، نه پیش‌نیاز سیگنال.
+5. **Auto Scan** فقط ستاپ A+ را در Shadow ثبت می‌کند.
 
-> `AI Strength` احتمال برد نیست. Win Rate واقعی فقط از Shadow/Forward/Live ثبت‌شده محاسبه می‌شود.
+> `AI Strength` احتمال برد نیست. Win Rate واقعی فقط از Shadow/Forward/Live ثبت‌شده محاسبه می‌شود. هدف ۹۰٪ Gate تحقیقاتی است، تضمین نیست.
 
-## امنیت و اجرا
+## راه‌اندازی سریع (آنلاین)
 
-- Bridge روی PC دارای MetaTrader 5 اجرا می‌شود.
-- رمز MT5 داخل WebView یا JavaScript ذخیره نمی‌شود.
-- API با Bearer Token محافظت می‌شود.
-- endpoint هوش مصنوعی فقط پیش‌بینی می‌دهد.
-- این Build **هیچ `order_send` یا endpoint اجرای معامله واقعی ندارد**.
+```bash
+python3 zarnegar_online.py
+```
 
-## راه‌اندازی سریع
+سپس مرورگر را روی `http://127.0.0.1:8080` باز کنید. اپ بلافاصله به فید زنده طلا وصل می‌شود.
 
-### 1) پایه MT5 Bridge
+ویندوز:
 
-در پوشه `bridge`:
+```bat
+start_online.bat
+```
+
+## MT5 Bridge (اختیاری، دقیق‌تر برای حساب بروکر)
 
 ```powershell
 pip install -r requirements.txt
-```
-
-### 2) Chronos-2
-
-```powershell
-pip install -r requirements-ai-chronos.txt
-```
-
-### 3) TimesFM 2.5
-
-TimesFM را طبق راهنمای رسمی Google Research با PyTorch نصب کنید. اگر نصب نباشد، Bridge با Chronos-2 به حالت `PARTIAL` ادامه می‌دهد. اگر هیچ مدل Foundation در دسترس نباشد، AI تصمیم معاملاتی صادر نمی‌کند و حالت `DEGRADED / WAIT` می‌دهد.
-
-### 4) اجرای Bridge
-
-```powershell
 $env:ZARNEGAR_TOKEN="یک-توکن-طولانی-و-خصوصی"
 python mt5_bridge.py
 ```
 
-سپس در اپ:
+در تنظیمات اپ:
 
 - Feed Mode = `MT5 Bridge • Read Only`
 - Bridge URL = IP کامپیوتر + پورت 8765
 - Bearer Token = همان Token
-- AI Fusion = ON
+- Apex Fusion = ON
+
+Chronos-2 / TimesFM فقط اگر نصب باشند به کمیته اضافه می‌شوند. بدون آن‌ها Apex همچنان تصمیم می‌دهد.
 
 ## ساخت APK
 
-پروژه را در Android Studio باز کنید و:
+پروژه را در Android Studio باز کنید:
 
 `Build > Build APK(s)`
 
-یا از Workflow آماده GitHub Actions استفاده کنید. خروجی Debug:
+خروجی Debug: `app/build/outputs/apk/debug/app-debug.apk`
 
-`app/build/outputs/apk/debug/app-debug.apk`
+## امنیت
 
-## Validation
-
-هدف 90% فقط Gate تحقیقاتی است و تضمین نیست. قبل از هر Live Trading باید نمونه Shadow کافی، Win Rate، Profit Factor و Drawdown واقعی بررسی شوند.
+- هیچ `order_send` وجود ندارد.
+- رمز MT5 داخل WebView ذخیره نمی‌شود.
+- فید عمومی فقط از hostهای مجاز در لایه Native خوانده می‌شود.

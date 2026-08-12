@@ -1,6 +1,9 @@
-Zarnegar v61 AI providers
+Zarnegar v61 Apex AI providers
 
-Chronos-2:
+Primary engine (no extra packages):
+  Apex Quant Fusion — always on
+
+Chronos-2 (optional booster):
   pip install -r requirements-ai-chronos.txt
 
 TimesFM 2.5:

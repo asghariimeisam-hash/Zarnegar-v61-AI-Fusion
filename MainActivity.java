@@ -224,6 +224,60 @@ public class MainActivity extends Activity {
         });
     }
 
+    private boolean allowedPublicHost(String host) {
+        if (host == null) return false;
+        String h = host.toLowerCase(Locale.US);
+        return h.equals("forex-data-feed.swissquote.com")
+                || h.equals("api.gold-api.com")
+                || h.equals("api.coingecko.com")
+                || h.equals("xaus.com")
+                || h.equals("www.xaus.com")
+                || h.equals("query1.finance.yahoo.com")
+                || h.equals("query2.finance.yahoo.com");
+    }
+
+    private void httpGetPublicAsync(String kind, String rawUrl, int connectMs, int readMs) {
+        aiIo.submit(() -> {
+            HttpURLConnection c = null;
+            try {
+                java.net.URL url = new java.net.URL(rawUrl);
+                if (!"https".equalsIgnoreCase(url.getProtocol()) || !allowedPublicHost(url.getHost())) {
+                    sendJsReply(kind, "{\"ok\":false,\"error\":\"HOST_NOT_ALLOWED\"}");
+                    return;
+                }
+                c = (HttpURLConnection) url.openConnection();
+                c.setRequestMethod("GET");
+                c.setConnectTimeout(connectMs);
+                c.setReadTimeout(readMs);
+                c.setUseCaches(false);
+                c.setRequestProperty("Accept", "application/json");
+                c.setRequestProperty("User-Agent", "Mozilla/5.0 Zarnegar-Apex-Android");
+                int code = c.getResponseCode();
+                InputStream stream = code >= 200 && code < 300 ? c.getInputStream() : c.getErrorStream();
+                String body = stream != null ? readAll(stream) : "";
+                if (code >= 200 && code < 300) {
+                    sendJsReply(kind, body);
+                } else {
+                    JSONObject err = new JSONObject();
+                    err.put("ok", false);
+                    err.put("error", "HTTP_" + code);
+                    err.put("detail", body.length() > 300 ? body.substring(0, 300) : body);
+                    sendJsReply(kind, err.toString());
+                }
+            } catch (Exception e) {
+                try {
+                    JSONObject err = new JSONObject();
+                    err.put("ok", false);
+                    err.put("error", "PUBLIC_NETWORK_ERROR");
+                    err.put("detail", e.getClass().getSimpleName());
+                    sendJsReply(kind, err.toString());
+                } catch (Exception ignored) { }
+            } finally {
+                if (c != null) c.disconnect();
+            }
+        });
+    }
+
     private void httpGetAiAsync(String kind, String pathAndQuery) {
         final String base = bridgeBase();
         if (!validBridgeUrl(base)) {
@@ -309,7 +363,15 @@ public class MainActivity extends Activity {
             } catch (Exception e) { return false; }
         }
 
-        @JavascriptInterface public String getAppVersion() { return "6.1.0"; }
+        @JavascriptInterface public String getAppVersion() { return "6.1.1"; }
+
+        @JavascriptInterface public void requestPublicGet(String kind, String url) {
+            if (kind == null || url == null) {
+                sendJsReply("public", "{\"ok\":false,\"error\":\"BAD_REQUEST\"}");
+                return;
+            }
+            httpGetPublicAsync(kind, url.trim(), 6000, 20000);
+        }
 
         @JavascriptInterface public String getBridgeConfig() {
             try {
