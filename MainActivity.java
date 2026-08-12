@@ -375,6 +375,52 @@ public class MainActivity extends Activity {
             }
         }
 
+        @JavascriptInterface public void requestLiveQuote() {
+            io.submit(() -> {
+                String[] urls = new String[] {
+                    "https://api.gold-api.com/price/XAU",
+                    "https://data-asg.goldprice.org/dbXRates/USD"
+                };
+                for (String url : urls) {
+                    HttpURLConnection c = null;
+                    try {
+                        c = (HttpURLConnection) new java.net.URL(url).openConnection();
+                        c.setRequestMethod("GET");
+                        c.setConnectTimeout(5000);
+                        c.setReadTimeout(6000);
+                        c.setUseCaches(false);
+                        c.setRequestProperty("Accept", "application/json");
+                        c.setRequestProperty("User-Agent", "Zarnegar-v61-Android");
+                        int code = c.getResponseCode();
+                        InputStream stream = code >= 200 && code < 300 ? c.getInputStream() : null;
+                        if (stream == null) continue;
+                        String body = readAll(stream);
+                        JSONObject j = new JSONObject(body);
+                        double px = j.optDouble("price", Double.NaN);
+                        if (Double.isNaN(px) && j.has("items")) {
+                            px = j.getJSONArray("items").optJSONObject(0).optDouble("xauPrice", Double.NaN);
+                        }
+                        if (Double.isNaN(px) || px < 100) continue;
+                        JSONObject out = new JSONObject();
+                        out.put("ok", true);
+                        out.put("symbol", "XAUUSD");
+                        out.put("price", px);
+                        out.put("bid", px - 0.09);
+                        out.put("ask", px + 0.09);
+                        out.put("spread", 0.18);
+                        out.put("source", "ONLINE");
+                        out.put("time_msc", System.currentTimeMillis());
+                        sendJsReply("live", out.toString());
+                        return;
+                    } catch (Exception ignored) {
+                    } finally {
+                        if (c != null) c.disconnect();
+                    }
+                }
+                sendJsReply("live", "{\"ok\":false,\"error\":\"LIVE_QUOTE_FAIL\"}");
+            });
+        }
+
         @JavascriptInterface public void requestAi(String symbol) {
             try {
                 String s = URLEncoder.encode(symbol == null ? "XAUUSD" : symbol, "UTF-8");
