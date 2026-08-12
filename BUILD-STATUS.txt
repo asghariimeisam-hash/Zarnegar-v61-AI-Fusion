@@ -17,7 +17,8 @@ Static checks completed in this environment:
 - Real order-send endpoint: ABSENT / READ-ONLY
 - Android project structure: READY for Android Studio / Gradle
 
-An installable APK was not compiled in this runtime because Android SDK/build tools are not installed here.
-Use Android Studio Build > Build APK(s), or the included GitHub Actions workflow.
+Project is now a real Gradle module (`:app`). APK is built by GitHub Actions on every push:
+Actions > Android Build > artifact `zarnegar-pro-debug`.
+Local: Android Studio > Build > Build APK(s).
 
 Important: AI Strength is not a win probability. The 90% target remains a validation goal only and is not guaranteed.

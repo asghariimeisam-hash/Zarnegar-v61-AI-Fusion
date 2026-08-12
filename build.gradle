@@ -1,13 +1,3 @@
-plugins { id 'com.android.application' }
-
-android {
-    namespace 'com.zarnegar.privatepro'
-    compileSdk 35
-    defaultConfig {
-        applicationId 'com.zarnegar.privatepro'
-        minSdk 23
-        targetSdk 35
-        versionCode 610
-        versionName '6.1.0'
-    }
+plugins {
+    id 'com.android.application' version '8.7.3' apply false
 }
