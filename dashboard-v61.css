@@ -37,3 +37,21 @@ input,select,textarea{font-size:16px}
 
 /* v61 AI Fusion */
 .aiPanel{border-color:#4b3f75;background:linear-gradient(150deg,rgba(24,22,48,.96),rgba(8,14,19,.97))}.aiDecision{display:grid;grid-template-columns:repeat(4,1fr);gap:8px}.aiDecision>div{padding:11px;border:1px solid #3a3554;border-radius:13px;text-align:center;background:#ffffff03}.aiDecision small{display:block}.aiDecision b{display:block;margin-top:5px;font-size:17px}.aiProviders{display:grid;gap:7px;margin-top:12px}.aiProvider{display:grid;grid-template-columns:1fr auto auto;gap:10px;align-items:center;padding:10px;border:1px solid #343249;border-radius:12px;background:#0c111b}.aiProvider b{display:block;font-size:11px;color:#d9c7ff}.aiProvider small{display:block;margin-top:3px}.aiProvider strong{font-size:14px}.aiProvider span{font-size:9px;color:#929aa4}.aiPanel .goldBtn{background:linear-gradient(90deg,#d8b84e,#bca2ff)}@media(max-width:560px){.aiDecision{grid-template-columns:repeat(2,1fr)}}
+
+/* Pro terminal */
+.ticker{margin:0 0 12px;padding:12px 16px;display:grid;grid-template-columns:auto 1fr auto;grid-template-rows:auto auto;gap:2px 12px;align-items:center;background:linear-gradient(90deg,#0a1014,#101820);border-bottom:1px solid #243038}
+.ticker .sym{font-size:11px;letter-spacing:2px;color:#8b949a;grid-column:1}
+.ticker .px{font-size:28px;font-weight:900;font-variant-numeric:tabular-nums;grid-column:2}
+.ticker .chg{font-size:14px;font-weight:800;grid-column:3}
+.ticker .meta{grid-column:1/4;font-size:9px;color:#7d878d}
+.ticker .sess{display:none}
+.ticker .up{color:#3ee6aa}.ticker .dn{color:#ff6f84}
+.livePill{display:inline-flex;align-items:center;gap:6px;font-size:9px;letter-spacing:1px;border:1px solid #2d4a40;border-radius:999px;padding:6px 10px;color:#8aa}.livePill i{width:7px;height:7px;border-radius:50%;background:#556}
+.livePill.on{color:#5ce3b0;border-color:#2d6b53}.livePill.on i{background:#35dfa0;box-shadow:0 0 10px #35dfa0;animation:pulse 1.4s infinite}
+@keyframes pulse{50%{opacity:.45}}
+.proHero{border-color:#3a4d3a}
+.buyGlow{box-shadow:0 0 40px #35dfa014,inset 0 0 0 1px #2a5a44}
+.sellGlow{box-shadow:0 0 40px #f2647814,inset 0 0 0 1px #5a2a33}
+.aiHint{margin-top:8px;font-size:11px;color:#b7c0c5}
+.cUp{fill:#3ee6aa}.cDn{fill:#ff6f84}.wickUp{stroke:#3ee6aa;stroke-width:1.2}.wickDn{stroke:#ff6f84;stroke-width:1.2}.chLab{fill:#6d777d;font-size:10px}
+body{font-family:ui-sans-serif,system-ui,Tahoma,Arial}

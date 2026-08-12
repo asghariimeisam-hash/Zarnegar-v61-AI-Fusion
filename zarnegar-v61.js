@@ -8,7 +8,7 @@ const DEF = {
   symbol: 'XAUUSD',
   price: 2431.80,
   appMode: 'SIGNAL',
-  feedMode: 'SIMULATION',
+  feedMode: 'LIVE_WEB',
   executionEnabled: false,
   broker: { name: 'Alpari', platform: 'UNSET', status: 'NOT_CONFIGURED', bridgeStatus: 'OFFLINE' },
   market: { status: 'SIMULATION', resolvedSymbol: 'XAUUSD', bid: null, ask: null, spread: null, tickTime: null, lastError: null, bridgeConfigured: false, hasToken: false },
@@ -26,7 +26,7 @@ const DEF = {
     validationMaxDD: 8,
     newsLock: false,
     keepScreenOn: true,
-    minAiScore: 72,
+    minAiScore: 76,
     aiRefreshSec: 30
   },
   ai: {
@@ -117,12 +117,67 @@ function ema(vals, p) {
 }
 function rsi(vals, p=14) {
   if (vals.length < p + 1) return 50;
-  let g=0, l=0;
-  for (let i=vals.length-p; i<vals.length; i++) {
-    const d = vals[i] - vals[i-1]; if (d > 0) g += d; else l -= d;
+  let ag=0, al=0;
+  for (let i=1; i<=p; i++) {
+    const d = vals[i] - vals[i-1];
+    if (d >= 0) ag += d; else al -= d;
   }
-  if (l === 0) return 100;
-  const rs = (g/p) / (l/p); return 100 - (100/(1+rs));
+  ag /= p; al /= p;
+  for (let i=p+1; i<vals.length; i++) {
+    const d = vals[i] - vals[i-1];
+    const g = d > 0 ? d : 0, l = d < 0 ? -d : 0;
+    ag = (ag * (p-1) + g) / p;
+    al = (al * (p-1) + l) / p;
+  }
+  if (al === 0) return 100;
+  const rs = ag / al; return 100 - (100/(1+rs));
+}
+function sessionQuality() {
+  const d = new Date();
+  const h = d.getUTCHours() + d.getUTCMinutes()/60;
+  const wd = d.getUTCDay();
+  if (wd === 0 || wd === 6) return {ok:false, name:'WEEKEND', q:0.1};
+  if (wd === 5 && h >= 18) return {ok:false, name:'FRIDAY_LATE', q:0.25};
+  if (h >= 12 && h < 16.5) return {ok:true, name:'LONDON / NY OVERLAP', q:1};
+  if (h >= 7 && h < 12) return {ok:true, name:'LONDON', q:0.88};
+  if (h >= 16.5 && h < 20) return {ok:true, name:'NEW YORK', q:0.72};
+  return {ok:false, name:'ASIA / OFF', q:0.3};
+}
+function localAlphaDecision() {
+  if (!dataReady()) return {decision:'WAIT', strength:0, agreement:0, status:'WARMING', providers:[], regime:null};
+  const m5=frames.M5, m15=frames.M15, h1=frames.H1;
+  const c5=m5.map(x=>x.c), c15=m15.map(x=>x.c), c1h=h1.map(x=>x.c);
+  const a=atr(m5,14);
+  const h20=ema(c1h.slice(-120),20), h50=ema(c1h.slice(-160),50);
+  const e9=ema(c15.slice(-80),9), e21=ema(c15.slice(-100),21), e50=ema(c15.slice(-140),50);
+  const rv=rsi(c15,14);
+  const slope=(c15.at(-1)-c15.at(-6))/Math.max(a,1e-9);
+  const sess=sessionQuality();
+  let dir='WAIT', pts=0;
+  if (h20>h50 && e9>e21 && e21>e50 && rv>=48 && rv<=68 && slope>0) { dir='BUY'; pts=72+Math.min(20,slope*8)+sess.q*8; }
+  else if (h20<h50 && e9<e21 && e21<e50 && rv<=52 && rv>=32 && slope<0) { dir='SELL'; pts=72+Math.min(20,Math.abs(slope)*8)+sess.q*8; }
+  if (!sess.ok) dir='WAIT';
+  return {
+    decision: dir,
+    strength: Math.max(0, Math.min(96, dir==='WAIT'?Math.min(pts,64):pts)),
+    agreement: dir==='WAIT'?0.45:0.78,
+    status: 'READY',
+    providers: [{name:'Local-Alpha', ready:true, direction:dir, strength:pts}],
+    regime: {trend: h20>h50?'BUY':h20<h50?'SELL':'RANGE', rsi:rv, atr:a, session:sess.name, session_q:sess.q}
+  };
+}
+function applyLocalAi() {
+  if (state.feedMode==='MT5_BRIDGE' && state.ai.enabled && hasNative()) return;
+  const a=localAlphaDecision();
+  state.ai.status=a.status;
+  state.ai.decision=a.decision;
+  state.ai.strengthScore=a.strength;
+  state.ai.agreement=a.agreement;
+  state.ai.providers=a.providers;
+  state.ai.regime=a.regime;
+  state.ai.receivedAt=Date.now();
+  state.ai.generatedAt=Date.now();
+  state.ai.note='Online Local-Alpha. Chronos/TimesFM when MT5 Bridge is on.';
 }
 function atr(bars, p=14) {
   if (bars.length < p + 1) return NaN;
@@ -194,7 +249,52 @@ function simulationStep() {
   save(); render(false);
 }
 
-function currentSource() { return state.feedMode === 'MT5_BRIDGE' ? 'SHADOW' : 'SIMULATION'; }
+function currentSource() { return state.feedMode === 'MT5_BRIDGE' ? 'SHADOW' : (state.feedMode === 'LIVE_WEB' ? 'LIVE' : 'SIMULATION'); }
+
+let livePending=false;
+async function pullLiveQuote() {
+  if (state.feedMode !== 'LIVE_WEB' || livePending) return;
+  livePending=true;
+  try {
+    const urls = [
+      'https://api.gold-api.com/price/XAU',
+      'https://data-asg.goldprice.org/dbXRates/USD'
+    ];
+    let price=null, t=Date.now();
+    for (const url of urls) {
+      try {
+        const r = await fetch(url, {cache:'no-store'});
+        if (!r.ok) continue;
+        const j = await r.json();
+        if (Number.isFinite(+j.price)) { price=+j.price; t=j.updatedAt?Date.parse(j.updatedAt)||t:t; break; }
+        const item=j?.items?.[0];
+        if (item && Number.isFinite(+item.xauPrice)) { price=+item.xauPrice; break; }
+      } catch (_) {}
+    }
+    if (!Number.isFinite(price)) {
+      state.market.lastError='LIVE_QUOTE_FAIL';
+      return;
+    }
+    const spread=0.18;
+    state.price=price;
+    state.market.status='LIVE';
+    state.market.bid=price-spread/2;
+    state.market.ask=price+spread/2;
+    state.market.spread=spread;
+    state.market.tickTime=t;
+    state.market.resolvedSymbol='XAUUSD';
+    state.market.lastError=null;
+    state.broker.bridgeStatus='ONLINE';
+    if (!frames.M1.length) initSimulation();
+    const newM1=upsertTickToFrame('M1',1,price,Date.now());
+    upsertTickToFrame('M5',5,price,Date.now());
+    upsertTickToFrame('M15',15,price,Date.now());
+    upsertTickToFrame('H1',60,price,Date.now());
+    applyLocalAi();
+    evaluateOpenSignalsTick(state.market.bid,state.market.ask,newM1);
+    save(); render(false);
+  } finally { livePending=false; }
+}
 function metrics(source) {
   const xs = state.history.filter(x => x.source===source && x.resolution && (x.resolution.result==='WIN'||x.resolution.result==='LOSS'));
   const wins=xs.filter(x=>x.resolution.result==='WIN').length, losses=xs.length-wins;
@@ -260,15 +360,17 @@ function pipeline() {
   const mtfTrend = direction==='BUY' ? (e9>e21&&e21>e50&&e9>e9prev) : direction==='SELL' ? (e9<e21&&e21<e50&&e9<e9prev) : false;
   const rv=rsi(m15c,14);
   const last3=m15c.at(-1)-m15c.at(-4);
-  const momentum = direction==='BUY' ? (rv>=53&&rv<=69&&last3>0) : direction==='SELL' ? (rv<=47&&rv>=31&&last3<0) : false;
+  const momentum = direction==='BUY' ? (rv>=52&&rv<=67&&last3>0) : direction==='SELL' ? (rv<=48&&rv>=33&&last3<0) : false;
+  const notExhausted = direction==='BUY' ? rv<70 : direction==='SELL' ? rv>30 : false;
 
   const av=atr(m5,14), m5e9=ema(m5c.slice(-80),9), last=m5.at(-1), prev=m5.slice(-5,-1);
   const prevLow=Math.min(...prev.map(x=>x.l)), prevHigh=Math.max(...prev.map(x=>x.h));
   const structure = direction==='BUY'
-    ? (last.c>m5e9 && last.c>last.o && last.l>prevLow && last.l<=m5e9+(Number.isFinite(av)?av*.35:0))
+    ? (last.c>m5e9 && last.c>last.o && last.l>prevLow && last.l<=m5e9+(Number.isFinite(av)?av*.28:0))
     : direction==='SELL'
-      ? (last.c<m5e9 && last.c<last.o && last.h<prevHigh && last.h>=m5e9-(Number.isFinite(av)?av*.35:0))
+      ? (last.c<m5e9 && last.c<last.o && last.h<prevHigh && last.h>=m5e9-(Number.isFinite(av)?av*.28:0))
       : false;
+  const sess=sessionQuality();
 
   const spread=Number.isFinite(+state.market.spread)?+state.market.spread:Infinity;
   const spreadPass=spread<=state.settings.maxSpread;
@@ -277,22 +379,26 @@ function pipeline() {
   const newsPass=!state.settings.newsLock;
   const noOpen=!state.history.some(x=>x.source===currentSource()&&x.status==='SIGNAL'&&!x.resolution);
 
-  const technicalQuality=(direction?20:0)+(mtfTrend?20:0)+(momentum?15:0)+(structure?20:0)+(volPass?10:0)+(spreadPass?10:0)+(freshPass?5:0);
-  const aiRequired=state.feedMode==='MT5_BRIDGE' && state.ai.enabled;
+  const technicalQuality=(direction?18:0)+(mtfTrend?18:0)+(momentum?12:0)+(structure?18:0)+(volPass?8:0)+(spreadPass?8:0)+(freshPass?5:0)+(sess.ok?8:0)+(notExhausted?5:0);
+  const aiRequired=state.ai.enabled && (state.feedMode==='MT5_BRIDGE' || state.feedMode==='LIVE_WEB');
   const aiFresh=!aiRequired || (aiAgeSec()<=Math.max(90,state.settings.aiRefreshSec*3));
   const aiReady=!aiRequired || ['READY','PARTIAL'].includes(state.ai.status);
   const aiDirection=!aiRequired || (!!direction && state.ai.decision===direction);
   const aiScore=!aiRequired || (+state.ai.strengthScore>=state.settings.minAiScore);
-  const aiPass=aiFresh&&aiReady&&aiDirection&&aiScore;
-  let quality=aiRequired?Math.round(technicalQuality*.72+Math.min(100,+state.ai.strengthScore||0)*.28):technicalQuality;
+  const aiAgree=!aiRequired || (+state.ai.agreement>=0.62);
+  const aiPass=aiFresh&&aiReady&&aiDirection&&aiScore&&aiAgree;
+  let quality=aiRequired?Math.round(technicalQuality*.68+Math.min(100,+state.ai.strengthScore||0)*.32):technicalQuality;
   if(!noOpen)quality=Math.min(quality,75);
+  if(!sess.ok)quality=Math.min(quality,78);
   const qualityPass=quality>=state.settings.minQuality;
-  const gates={h1Trend:!!direction,m15Trend:mtfTrend,momentum,structure,volatility:volPass,spread:spreadPass,fresh:freshPass,news:newsPass,noOpen,ai:aiPass,quality:qualityPass};
+  const gates={h1Trend:!!direction,m15Trend:mtfTrend,momentum,structure,volatility:volPass,spread:spreadPass,fresh:freshPass,news:newsPass,noOpen,session:sess.ok,ai:aiPass,quality:qualityPass};
   const pass=Object.values(gates).every(Boolean);
   const reasons=[];
   if(!direction)reasons.push('روند H1 با EMA20/50 تأیید نشده');
   if(!mtfTrend)reasons.push('هم‌جهتی روند M15 با H1 کامل نیست');
   if(!momentum)reasons.push('RSI/Momentum در محدوده A+ نیست');
+  if(!notExhausted)reasons.push('روند خسته است (RSI افراطی)');
+  if(!sess.ok)reasons.push('خارج از سشن لندن/نیویورک ('+sess.name+')');
   if(!structure)reasons.push('ساختار ورود M5 تأیید نشده');
   if(!volPass)reasons.push('ATR پنج‌دقیقه خارج از محدوده مجاز است');
   if(!spreadPass)reasons.push('Spread از سقف تعیین‌شده بیشتر است');
@@ -303,12 +409,15 @@ function pipeline() {
   if(state.feedMode==='MT5_BRIDGE'&&state.ai.enabled&&aiReady&&!aiFresh)reasons.push('خروجی AI تازه نیست');
   if(state.feedMode==='MT5_BRIDGE'&&state.ai.enabled&&aiReady&&direction&&state.ai.decision!==direction)reasons.push('AI Fusion با جهت تکنیکال هم‌نظر نیست');
   if(state.feedMode==='MT5_BRIDGE'&&state.ai.enabled&&aiReady&&+state.ai.strengthScore<state.settings.minAiScore)reasons.push('AI Strength به حداقل تعیین‌شده نرسیده');
+  if(state.feedMode==='MT5_BRIDGE'&&state.ai.enabled&&aiReady&&+state.ai.agreement<0.62)reasons.push('توافق مدل‌های AI کافی نیست');
   if(!qualityPass)reasons.push('Setup Quality به حداقل نرسیده');
 
   const bid=+state.market.bid, ask=+state.market.ask;
   const mid=Number.isFinite(bid)&&Number.isFinite(ask)?(bid+ask)/2:m5c.at(-1);
   const entry=direction==='BUY'&&Number.isFinite(ask)?ask:direction==='SELL'&&Number.isFinite(bid)?bid:mid;
-  const risk=Math.max((Number.isFinite(av)?av:1)*1.30, Number.isFinite(spread)?spread*4:0, .60);
+  const swing = direction==='BUY' ? Math.min(...m5.slice(-8).map(x=>x.l)) : Math.max(...m5.slice(-8).map(x=>x.h));
+  const structRisk = direction && Number.isFinite(swing) ? Math.abs(entry-swing)+Math.max(av||0,0.15)*0.15 : 0;
+  const risk=Math.max((Number.isFinite(av)?av:1)*1.15, Number.isFinite(spread)?spread*4:0, structRisk, .55);
   const sign=direction==='SELL'?-1:1, rr1=state.settings.minRR;
   const sl=direction?entry-sign*risk:null, tp1=direction?entry+sign*risk*rr1:null, tp2=direction?entry+sign*risk*2.10:null, tp3=direction?entry+sign*risk*2.85:null;
   const z1=direction?entry-sign*(Number.isFinite(av)?av*.10:.1):null, z2=direction?entry+sign*(Number.isFinite(av)?av*.08:.1):null;
@@ -411,9 +520,10 @@ function onNativeReply(kind,payload){
 }
 
 function setFeedMode(mode){
-  const m=mode==='MT5_BRIDGE'?'MT5_BRIDGE':'SIMULATION';
+  const m=mode==='MT5_BRIDGE'?'MT5_BRIDGE':(mode==='LIVE_WEB'?'LIVE_WEB':'SIMULATION');
   state.feedMode=m;lastCycle=null;
-  if(m==='SIMULATION'){initSimulation();state.broker.bridgeStatus='OFFLINE';state.ai.status='NOT_USED';state.ai.decision='WAIT';}
+  if(m==='SIMULATION'){initSimulation();state.broker.bridgeStatus='OFFLINE';applyLocalAi();}
+  else if(m==='LIVE_WEB'){if(!frames.M5.length)initSimulation();state.market.status='CONNECTING';state.broker.bridgeStatus='ONLINE';applyLocalAi();pullLiveQuote();}
   else {frames={M1:[],M5:[],M15:[],H1:[]};state.market.status='OFFLINE';state.ai.status='NOT_READY';state.ai.decision='WAIT';state.market.bid=null;state.market.ask=null;state.market.spread=null;state.market.tickTime=null;readBridgeConfig();requestHealth();syncBars();}
   save();render();restartTimers();applyKeepScreen();
 }
@@ -433,7 +543,14 @@ function setTab(t){state.ui.tab=t;save();render();}
 function toggleNewsLock(){state.settings.newsLock=!state.settings.newsLock;save();render();}
 function toggleKeepScreen(){state.settings.keepScreenOn=!state.settings.keepScreenOn;save();applyKeepScreen();render();}
 
-function header(){return `<header><div><div class="micro">PERSONAL • XAUUSD AI FUSION</div><div class="brand">ZARNEGAR <b>v61</b></div><div class="sub">Chronos‑2 + TimesFM 2.5 + MTF Risk Gates</div></div><div class="precisionBadge">AI FUSION</div></header>`;}
+function liveDot(){const live=state.market.status==='LIVE'||state.feedMode==='LIVE_WEB';return `<span class="livePill ${live?'on':''}"><i></i>${live?'LIVE':'OFFLINE'}</span>`;}
+function tickerTape(){
+  const chg = frames.M5.length>2 ? frames.M5.at(-1).c - frames.M5.at(-2).c : 0;
+  const up = chg>=0;
+  const sess=sessionQuality();
+  return `<section class="ticker"><div class="sym">XAUUSD</div><div class="px ${up?'up':'dn'}">${fmt(state.price,2)}</div><div class="chg ${up?'up':'dn'}">${up?'+':''}${fmt(chg,2)}</div><div class="meta">BID ${fmt(state.market.bid)} · ASK ${fmt(state.market.ask)} · SPR ${fmt(state.market.spread,3)}</div><div class="sess">${esc(sess.name)}</div>${liveDot()}</section>`;
+}
+function header(){return `<header><div><div class="micro">INSTITUTIONAL DESK · XAUUSD</div><div class="brand">ZARNEGAR <b>PRO</b></div><div class="sub">Smart Signal · Multi-model Fusion · Online</div></div>${liveDot()}</header>${tickerTape()}`;}
 function modeSwitch(){return `<section class="modeSwitch"><button class="${state.appMode==='SIGNAL'?'active':''}" onclick="Z.mode('SIGNAL')">◆ SIGNAL MODE<br><small>تحلیل و Shadow</small></button><button class="trader ${state.appMode==='TRADER'?'active':''}" onclick="Z.mode('TRADER')">⚡ TRADER MODE<br><small>Real execution قفل است</small></button></section>`;}
 function brokerStrip(){const age=tickAgeSec();return `<section class="brokerStrip"><div><small>BROKER</small><b>${esc(state.broker.name)}</b></div><div><small>PLATFORM</small><b class="${brokerReady()?'ready':'neutral'}">${esc(state.broker.platform)}</b></div><div><small>FEED</small><b class="${state.market.status==='LIVE'||state.market.status==='READY'?'ready':'neutral'}">${esc(state.feedMode)}</b></div><div><small>TICK AGE</small><b class="${age<=10?'ready':'locked'}">${Number.isFinite(age)?fmt(age,1)+'s':'—'}</b></div></section>`;}
 function feedPanel(){return `<section class="panel livePanel"><div class="title"><span class="kicker">MARKET DATA</span><span>${esc(state.market.status)}</span></div><div class="marketGrid"><div><small>BID</small><b>${fmt(state.market.bid)}</b></div><div><small>ASK</small><b>${fmt(state.market.ask)}</b></div><div><small>SPREAD</small><b>${fmt(state.market.spread,3)}</b></div><div><small>SYMBOL</small><b>${esc(state.market.resolvedSymbol||state.symbol)}</b></div></div><div class="statusline"><span class="statusdot ${state.market.status==='LIVE'||state.market.status==='READY'?'':'warn'}"></span>${faTime()} • ${state.market.lastError?'خطا: '+esc(state.market.lastError):'Execution: READ-ONLY / SHADOW'}</div>${state.feedMode==='MT5_BRIDGE'?`<div class="toolbar"><button onclick="Z.testBridge()">تست Bridge</button><button onclick="Z.syncBars()">همگام‌سازی MTF</button></div>`:''}</section>`;}
@@ -445,39 +562,56 @@ function aiPanel(){
 }
 function gatesHtml(x){
   if(!x?.gates)return'';
-  const labels={h1Trend:'H1 Trend',m15Trend:'M15 Align',momentum:'Momentum',structure:'M5 Entry',volatility:'ATR',spread:'Spread',fresh:'Fresh Tick',news:'News Lock',noOpen:'No Open',ai:'AI Fusion',quality:'Quality'};
+  const labels={h1Trend:'H1 Trend',m15Trend:'M15 Align',momentum:'Momentum',structure:'M5 Entry',volatility:'ATR',spread:'Spread',fresh:'Fresh Tick',news:'News Lock',noOpen:'No Open',session:'Session',ai:'AI Fusion',quality:'Quality'};
   return `<div class="gateGrid">${Object.entries(x.gates).map(([k,v])=>`<div class="gate ${v?'pass':'fail'}"><span>${labels[k]||esc(k)}</span><b>${v?'PASS':'BLOCK'}</b></div>`).join('')}</div>`;
 }
 function signalCard(x){
-  if(!x)return `<section class="hero signalHero"><div class="heroTop"><span class="eyebrow">PRECISION SCAN</span><span class="tinyPill">${dataReady()?'MTF READY':'WAITING DATA'}</span></div><h1 class="noTrade">READY</h1><p class="note">اسکن فقط با لمس شما اجرا می‌شود. Quality احتمال برد نیست؛ امتیاز عبور فیلترهاست.</p><button class="goldBtn" onclick="Z.cycle()" ${!dataReady()?'disabled':''}>اجرای Precision Scan</button></section>`;
-  if(x.status!=='SIGNAL')return `<section class="hero signalHero"><div class="heroTop"><span class="eyebrow">LAST SCAN • ${esc(x.source)}</span><span class="qualityRing">${fmt(x.quality,0)}</span></div><h1 class="noTrade">NO TRADE</h1><p class="note">شرایط A+ کامل نیست؛ عدم ورود بخشی از سیستم است.</p>${gatesHtml(x)}${x.reasons?.length?`<ul class="reasonList">${x.reasons.map(r=>`<li>${esc(r)}</li>`).join('')}</ul>`:''}<button class="goldBtn" onclick="Z.cycle()" ${!dataReady()?'disabled':''}>اسکن مجدد</button></section>`;
-  return `<section class="hero signalHero"><div class="signalHead"><div><span class="eyebrow">${esc(x.source)} • ${esc(x.resolvedSymbol||x.symbol)}</span><div class="signalDirection ${x.direction==='BUY'?'buy':'sell'}">${x.direction}</div></div><span class="qualityRing">${fmt(x.quality,0)}</span></div><div class="entryZone"><div><small>ENTRY ZONE</small><b>${fmt(x.entryLow)} — ${fmt(x.entryHigh)}</b></div><div><small>ENTRY EXECUTABLE</small><b>${fmt(x.entry)}</b></div></div><div class="targetGrid"><div><small>SL</small><b class="redTxt">${fmt(x.sl)}</b></div><div><small>TP1</small><b>${fmt(x.tp1)}</b></div><div><small>TP2</small><b>${fmt(x.tp2)}</b></div><div><small>TP3</small><b>${fmt(x.tp3)}</b></div></div><div class="countdown"><span>Entry window</span><b id="countdown">${countdownLeft>0?countdownLeft+'s':'—'}</b></div>${gatesHtml(x)}${state.appMode==='TRADER'?tradeBox(x):''}<button class="goldBtn" onclick="Z.cycle()">اسکن جدید</button></section>`;
+  const intel=state.ai.decision;
+  if(!x)return `<section class="hero signalHero proHero"><div class="heroTop"><span class="eyebrow">SMART DESK</span><span class="tinyPill">${dataReady()?'ENGINE LIVE':'WARMING'}</span></div><h1 class="noTrade">STANDBY</h1><p class="note">موتور سیگنال آنلاین هر ۴۵ ثانیه بازار طلا را اسکن می‌کند — فقط ستاپ A+ عبور می‌کند.</p><div class="aiHint">AI now: <b class="${intel==='BUY'?'ok':intel==='SELL'?'redTxt':''}">${esc(intel)}</b> · strength ${fmt(state.ai.strengthScore,0)}</div><button class="goldBtn" onclick="Z.cycle()" ${!dataReady()?'disabled':''}>اسکن هوشمند همین حالا</button></section>`;
+  if(x.status!=='SIGNAL')return `<section class="hero signalHero proHero"><div class="heroTop"><span class="eyebrow">SMART FILTER · ${esc(x.source)}</span><span class="qualityRing">${fmt(x.quality,0)}</span></div><h1 class="noTrade">NO TRADE</h1><p class="note">سرمایه حفظ شد. شرایط حرفه‌ای کامل نیست.</p>${gatesHtml(x)}${x.reasons?.length?`<ul class="reasonList">${x.reasons.slice(0,5).map(r=>`<li>${esc(r)}</li>`).join('')}</ul>`:''}<button class="goldBtn" onclick="Z.cycle()" ${!dataReady()?'disabled':''}>اسکن مجدد</button></section>`;
+  return `<section class="hero signalHero proHero ${x.direction==='BUY'?'buyGlow':'sellGlow'}"><div class="signalHead"><div><span class="eyebrow">INSTITUTIONAL SIGNAL · ${esc(x.resolvedSymbol||x.symbol)}</span><div class="signalDirection ${x.direction==='BUY'?'buy':'sell'}">${x.direction}</div><div class="aiHint">هم‌جهت با AI Fusion · Q ${fmt(x.quality,0)}</div></div><span class="qualityRing">${fmt(x.quality,0)}</span></div><div class="entryZone"><div><small>ENTRY ZONE</small><b>${fmt(x.entryLow)} — ${fmt(x.entryHigh)}</b></div><div><small>FILL</small><b>${fmt(x.entry)}</b></div></div><div class="targetGrid"><div><small>STOP</small><b class="redTxt">${fmt(x.sl)}</b></div><div><small>TP1</small><b>${fmt(x.tp1)}</b></div><div><small>TP2</small><b>${fmt(x.tp2)}</b></div><div><small>TP3</small><b>${fmt(x.tp3)}</b></div></div><div class="countdown"><span>پنجره ورود</span><b id="countdown">${countdownLeft>0?countdownLeft+'s':'—'}</b></div>${gatesHtml(x)}${state.appMode==='TRADER'?tradeBox(x):''}<button class="goldBtn" onclick="Z.cycle()">اسکن جدید</button></section>`;
+}
+function tradeBox(x){return `<div class="confirmBox"><b>🔒 Real Execution در v61 غیرفعال است</b><p class="mini">این نسخه فقط سفارش را برای بررسی آماده می‌کند و هیچ درخواست معاملاتی به MT5 ارسال نمی‌کند.</p><label><input type="checkbox" ${state.trade.confirm?'checked':''} onchange="Z.confirmTrade(this.checked)"> مقادیر Entry / SL / TP را بررسی کردم</label><button class="tradeBtn" ${state.trade.confirm?'':'disabled'} onclick="Z.prepareTrade('${esc(x.id)}')">PREPARE ONLY</button></div>`;}
+function statBoard(){const sim=metrics('SIMULATION'),sh=metrics('SHADOW');return `<section class="panel"><div class="title"><span class="kicker">REALITY CHECK</span><span>WR جداگانه</span></div><div class="metricBoard"><div><small>SIM WR</small><b>${metricText(sim.wr,'pct')}</b><span>n=${sim.n}</span></div><div><small>SHADOW WR</small><b>${metricText(sh.wr,'pct')}</b><span>n=${sh.n}</span></div><div><small>SHADOW PF</small><b>${metricText(sh.pf)}</b><span>هدف ≥ ${fmt(state.settings.validationMinPF)}</span></div><div><small>SHADOW DD</small><b>${fmt(sh.maxDD,2)}R</b><span>سقف ${fmt(state.settings.validationMaxDD,1)}R</span></div></div></section>`;}
+function validationPanel(){const v=validation(),m=v.m;return `<section class="panel"><div class="validationLock ${v.pass?'good':''}"><div class="title"><span>90% Validation Gate</span><span>${v.pass?'REVIEW ELIGIBLE':'LOCKED'}</span></div><div class="systemList"><div class="systemItem"><b>Shadow sample</b><span>${m.n} / ≥ ${state.settings.validationMinTrades}</span></div><div class="systemItem"><b>Win rate</b><span>${metricText(m.wr,'pct')} / ≥ ${pct(state.settings.validationTargetWR)}</span></div><div class="systemItem"><b>Profit Factor</b><span>${metricText(m.pf)} / ≥ ${fmt(state.settings.vagh)}</b></div><div><small>ENTRY EXECUTABLE</small><b>${fmt(x.entry)}</b></div></div><div class="targetGrid"><div><small>SL</small><b class="redTxt">${fmt(x.sl)}</b></div><div><small>TP1</small><b>${fmt(x.tp1)}</b></div><div><small>TP2</small><b>${fmt(x.tp2)}</b></div><div><small>TP3</small><b>${fmt(x.tp3)}</b></div></div><div class="countdown"><span>Entry window</span><b id="countdown">${countdownLeft>0?countdownLeft+'s':'—'}</b></div>${gatesHtml(x)}${state.appMode==='TRADER'?tradeBox(x):''}<button class="goldBtn" onclick="Z.cycle()">اسکن جدید</button></section>`;
 }
 function tradeBox(x){return `<div class="confirmBox"><b>🔒 Real Execution در v61 غیرفعال است</b><p class="mini">این نسخه فقط سفارش را برای بررسی آماده می‌کند و هیچ درخواست معاملاتی به MT5 ارسال نمی‌کند.</p><label><input type="checkbox" ${state.trade.confirm?'checked':''} onchange="Z.confirmTrade(this.checked)"> مقادیر Entry / SL / TP را بررسی کردم</label><button class="tradeBtn" ${state.trade.confirm?'':'disabled'} onclick="Z.prepareTrade('${esc(x.id)}')">PREPARE ONLY</button></div>`;}
 function statBoard(){const sim=metrics('SIMULATION'),sh=metrics('SHADOW');return `<section class="panel"><div class="title"><span class="kicker">REALITY CHECK</span><span>WR جداگانه</span></div><div class="metricBoard"><div><small>SIM WR</small><b>${metricText(sim.wr,'pct')}</b><span>n=${sim.n}</span></div><div><small>SHADOW WR</small><b>${metricText(sh.wr,'pct')}</b><span>n=${sh.n}</span></div><div><small>SHADOW PF</small><b>${metricText(sh.pf)}</b><span>هدف ≥ ${fmt(state.settings.validationMinPF)}</span></div><div><small>SHADOW DD</small><b>${fmt(sh.maxDD,2)}R</b><span>سقف ${fmt(state.settings.validationMaxDD,1)}R</span></div></div></section>`;}
 function validationPanel(){const v=validation(),m=v.m;return `<section class="panel"><div class="validationLock ${v.pass?'good':''}"><div class="title"><span>90% Validation Gate</span><span>${v.pass?'REVIEW ELIGIBLE':'LOCKED'}</span></div><div class="systemList"><div class="systemItem"><b>Shadow sample</b><span>${m.n} / ≥ ${state.settings.validationMinTrades}</span></div><div class="systemItem"><b>Win rate</b><span>${metricText(m.wr,'pct')} / ≥ ${pct(state.settings.validationTargetWR)}</span></div><div class="systemItem"><b>Profit Factor</b><span>${metricText(m.pf)} / ≥ ${fmt(state.settings.validationMinPF)}</span></div><div class="systemItem"><b>Max Drawdown</b><span>${fmt(m.maxDD,2)}R / ≤ ${fmt(state.settings.validationMaxDD,1)}R</span></div></div></div></section>`;}
-function chart(){const b=frames.M5.slice(-120);if(b.length<2)return'<div class="empty">داده نمودار هنوز آماده نیست</div>';const w=680,h=250,pad=18,min=Math.min(...b.map(x=>x.l)),max=Math.max(...b.map(x=>x.h));const pts=b.map((x,i)=>`${pad+i*(w-2*pad)/(b.length-1)},${h-pad-(x.c-min)/(max-min||1)*(h-2*pad)}`).join(' ');return `<svg viewBox="0 0 ${w} ${h}" preserveAspectRatio="none"><path class="grid" d="M0 60H680M0 125H680M0 190H680"/><polyline points="${pts}" class="line"/></svg>`;}
+function chart(){
+  const b=frames.M5.slice(-80);
+  if(b.length<2)return'<div class="empty">در حال همگام‌سازی نمودار زنده…</div>';
+  const w=720,h=280,pad=22,min=Math.min(...b.map(x=>x.l)),max=Math.max(...b.map(x=>x.h));
+  const y=v=>h-pad-(v-min)/(max-min||1)*(h-2*pad);
+  const x=i=>pad+i*(w-2*pad)/(b.length-1);
+  const candles=b.map((bar,i)=>{
+    const cx=x(i), bw=Math.max(2.2,(w-2*pad)/b.length*0.62);
+    const up=bar.c>=bar.o;
+    return `<line x1="${cx}" y1="${y(bar.h)}" x2="${cx}" y2="${y(bar.l)}" class="${up?'wickUp':'wickDn'}"/><rect x="${cx-bw/2}" y="${Math.min(y(bar.o),y(bar.c))}" width="${bw}" height="${Math.max(1.2,Math.abs(y(bar.c)-y(bar.o)))}" class="${up?'cUp':'cDn'}"/>`;
+  }).join('');
+  return `<svg viewBox="0 0 ${w} ${h}" preserveAspectRatio="none"><path class="grid" d="M0 70H720M0 140H720M0 210H720"/>${candles}<text x="14" y="18" class="chLab">${fmt(max,1)}</text><text x="14" y="${h-8}" class="chLab">${fmt(min,1)}</text></svg>`;
+}
 function row(x){const r=x.resolution?.result||'OPEN';return `<div class="row"><div><b>${x.status==='SIGNAL'?x.direction:'NO TRADE'}</b><small>${new Date(x.timestamp).toLocaleTimeString('fa-IR')} • Q${fmt(x.quality,0)} • ${esc(r)}</small></div><strong>${fmt(x.price)}</strong><span>${esc(x.source)}</span></div>`;}
 function safety(){return `<div class="safety"><b>🔒 اصل نسخه v61 AI Fusion</b><span>Chronos‑2 و TimesFM فقط لایه پیش‌بینی‌اند؛ AI Strength احتمال برد نیست. هدف ۹۰٪ فقط Gate ارزیابی است و تضمین نیست. اجرای واقعی سفارش همچنان غیرفعال است تا Shadow/Forward Validation کافی انجام شود.</span></div>`;}
 function nav(){return `<nav>${[['home','⌂','خانه'],['signal','◆','سیگنال'],['replay','◫','اعتبارسنجی'],['journal','☷','ژورنال'],['settings','⚙','تنظیمات']].map(x=>`<button class="${state.ui.tab===x[0]?'active':''}" onclick="Z.tab('${x[0]}')"><span>${x[1]}</span>${x[2]}</button>`).join('')}</nav>`;}
 
-function home(){const recent=state.history.slice(-6).reverse();return `<main>${header()}${modeSwitch()}${brokerStrip()}<div class="targetNotice">🧠 v61 AI Fusion: پیش‌بینی Chronos‑2 + TimesFM 2.5 با تأیید H1/M15/M5. اختلاف مدل‌ها یا ضعف شرایط بازار = WAIT / NO TRADE.</div>${feedPanel()}${aiPanel()}<section class="quick"><div><small>SCANS</small><b>${state.session.cycles}</b><span>cycles</span></div><div><small>SIGNALS</small><b>${state.session.signals}</b><span>A+ only</span></div><div><small>NO TRADE</small><b>${state.session.noTrades}</b><span>filtered</span></div><div><small>RISK</small><b>${fmt(state.settings.maxRiskPct,2)}%</b><span>planned max</span></div></section>${signalCard(lastCycle)}${statBoard()}${validationPanel()}<section class="panel"><div class="title"><span class="kicker">M5 MARKET MONITOR</span><span>${frames.M5.length} bars</span></div><div class="chart">${chart()}</div></section><section class="panel"><div class="title"><span class="kicker">SIGNAL TAPE</span><span>${recent.length} مورد</span></div>${recent.length?recent.map(row).join(''):'<div class="empty">رکوردی وجود ندارد</div>'}</section>${safety()}</main>${nav()}`;}
+function home(){const recent=state.history.slice(-6).reverse();return `<main>${header()}${modeSwitch()}${brokerStrip()}<div class="targetNotice">🧠 v61 AI Fusion: پیش‌بینی Local-Alpha + Chronos‑2 + TimesFM با تأیید H1/M15/M5 و سشن لندن/NY. اختلاف مدل‌ها یا ضعف شرایط بازار = WAIT / NO TRADE.</div>${feedPanel()}${aiPanel()}<section class="quick"><div><small>SCANS</small><b>${state.session.cycles}</b><span>cycles</span></div><div><small>SIGNALS</small><b>${state.session.signals}</b><span>A+ only</span></div><div><small>NO TRADE</small><b>${state.session.noTrades}</b><span>filtered</span></div><div><small>RISK</small><b>${fmt(state.settings.maxRiskPct,2)}%</b><span>planned max</span></div></section>${signalCard(lastCycle)}${statBoard()}${validationPanel()}<section class="panel"><div class="title"><span class="kicker">M5 MARKET MONITOR</span><span>${frames.M5.length} bars</span></div><div class="chart">${chart()}</div></section><section class="panel"><div class="title"><span class="kicker">SIGNAL TAPE</span><span>${recent.length} مورد</span></div>${recent.length?recent.map(row).join(''):'<div class="empty">رکوردی وجود ندارد</div>'}</section>${safety()}</main>${nav()}`;}
 function signal(){return `<main>${header()}${modeSwitch()}${feedPanel()}${aiPanel()}${signalCard(lastCycle)}<section class="panel"><div class="title">منطق MTF Precision</div><ul class="rules"><li>جهت اصلی از H1 EMA20/50 تعیین می‌شود.</li><li>M15 باید هم‌جهت باشد و Momentum/RSI محدوده A+ را پاس کند.</li><li>M5 برای ساختار Entry و ATR استفاده می‌شود.</li><li>Spread و تازگی Tick Gate مستقل دارند.</li><li>قفل خبر مهم دستی است و هنگام خبرهای پرریسک باید فعال شود.</li><li>Quality احتمال برد نیست.</li></ul></section>${validationPanel()}${safety()}</main>${nav()}`;}
 function replay(){const h=state.history.slice().reverse();return `<main>${header()}${statBoard()}${validationPanel()}<section class="panel"><div class="title">History / Forward Validation <span>${h.length} records</span></div><div class="toolbar"><button onclick="Z.export()">Export JSON</button><button onclick="Z.clearHistory()">پاک‌سازی</button></div>${h.length?h.slice(0,160).map(row).join(''):'<div class="empty">داده‌ای وجود ندارد</div>'}</section>${safety()}</main>${nav()}`;}
 function journal(){return `<main>${header()}<section class="panel"><div class="title">ژورنال شخصی</div><textarea id="jn" placeholder="Context بازار، خبر، دلیل ورود/عدم ورود، خطاها و نکته‌ها..."></textarea><div class="toolbar"><button class="goldBtn noMargin" onclick="Z.note()">ثبت یادداشت</button></div>${state.journal.slice().reverse().slice(0,100).map(x=>`<div class="journal"><b>${esc(x.tag)}</b><small>${new Date(x.at).toLocaleString('fa-IR')}</small><p>${esc(x.note)}</p></div>`).join('')}</section>${safety()}</main>${nav()}`;}
 function settings(){
-  return `<main>${header()}<section class="panel"><div class="title">Market Feed</div><label>Feed Mode<select id="feedMode"><option value="SIMULATION" ${state.feedMode==='SIMULATION'?'selected':''}>Simulation Lab</option><option value="MT5_BRIDGE" ${state.feedMode==='MT5_BRIDGE'?'selected':''}>MT5 Bridge • Read Only</option></select></label><button class="goldBtn" onclick="Z.applyFeed()">اعمال Feed</button><p class="note">برای آمار واقعی Shadow باید MT5 Bridge فعال باشد. Simulation با Shadow مخلوط نمی‌شود.</p></section><section class="panel"><div class="title">MT5 Bridge • Personal</div><p class="note">Bridge روی کامپیوتری اجرا می‌شود که MetaTrader 5 روی آن باز و وارد حساب شده است. رمز حساب بروکر داخل اپ ذخیره نمی‌شود. Token در SharedPreferences بومی Android ذخیره می‌شود و WebView امکان خواندن آن را ندارد.</p><label>Bridge URL<input id="bridgeUrl" class="ltr" placeholder="http://192.168.1.20:8765"></label><label>Bearer Token<input id="bridgeToken" class="ltr" type="password" placeholder="اگر قبلاً ذخیره شده خالی بگذارید"></label><div class="systemList"><div class="systemItem"><b>Configured</b><span>${state.market.bridgeConfigured?'YES':'NO'}</span></div><div class="systemItem"><b>Token saved</b><span>${state.market.hasToken?'YES':'NO'}</span></div><div class="systemItem"><b>Status</b><span>${esc(state.market.status)}</span></div></div><div class="toolbar"><button class="goldBtn noMargin" onclick="Z.saveBridge()">ذخیره و تست</button><button onclick="Z.clearBridge()">پاک‌کردن Bridge</button></div><p class="mini">HTTP فقط برای localhost/LAN/Tailscale private range پذیرفته می‌شود. برای آدرس عمومی HTTPS لازم است.</p></section><section class="panel"><div class="title">Broker Adapter</div><div class="selectRow"><label>Broker<input value="Alpari" disabled></label><label>Platform<select id="platform"><option value="UNSET" ${state.broker.platform==='UNSET'?'selected':''}>بعداً تعیین می‌کنم</option><option value="MT4" ${state.broker.platform==='MT4'?'selected':''}>MetaTrader 4</option><option value="MT5" ${state.broker.platform==='MT5'?'selected':''}>MetaTrader 5</option></select></label></div><button class="goldBtn" onclick="Z.saveBroker()">ذخیره</button></section><section class="panel"><div class="title">AI Fusion Engine</div><button class="${state.ai.enabled?'safeToggle':'dangerToggle'}" onclick="Z.toggleAi()">${state.ai.enabled?'🧠 AI FUSION ON':'⚪ AI FUSION OFF'}</button><p class="note">در فید MT5، سیگنال فقط وقتی عبور می‌کند که AI و موتور تکنیکال هم‌جهت باشند. خاموش‌کردن AI برای تست مقایسه‌ای است.</p><label>Minimum AI Strength (0-100)<input id="minAiScore" type="number" min="40" max="100" step="1" value="${state.settings.minAiScore}"></label><label>AI Refresh (sec)<input id="aiRefresh" type="number" min="15" max="300" step="5" value="${state.settings.aiRefreshSec}"></label><button class="goldBtn" onclick="Z.saveSettings()">ذخیره AI Gates</button><div class="systemList"><div class="systemItem"><b>Decision</b><span>${esc(state.ai.decision)}</span></div><div class="systemItem"><b>Strength</b><span>${fmt(state.ai.strengthScore,0)}/100</span></div><div class="systemItem"><b>Status</b><span>${esc(state.ai.status)}</span></div></div></section><section class="panel"><div class="title">Safety / News</div><button class="${state.settings.newsLock?'dangerToggle':'safeToggle'}" onclick="Z.toggleNewsLock()">${state.settings.newsLock?'🔴 NEWS LOCK ON — ورود مسدود':'🟢 NEWS LOCK OFF'}</button><p class="note">قبل و هنگام اخبار پرقدرت طلا/دلار این قفل را دستی روشن کنید. نسخه v61 هنوز Economic Calendar خودکار ندارد.</p></section><section class="panel"><div class="title">Precision Gates</div><label>Minimum Setup Quality (0-100)<input id="minQuality" type="number" min="50" max="100" step="1" value="${state.settings.minQuality}"></label><label>Max Spread (price units)<input id="spread" type="number" step=".01" value="${state.settings.maxSpread}"></label><label>Min M5 ATR<input id="minAtr" type="number" step=".05" value="${state.settings.minAtr}"></label><label>Max M5 ATR<input id="maxAtr" type="number" step=".1" value="${state.settings.maxAtr}"></label><label>TP1 minimum R:R<input id="rr" type="number" step=".05" value="${state.settings.minRR}"></label><label>Planned Max Risk %<input id="risk" type="number" step=".05" value="${state.settings.maxRiskPct}"></label><label>Entry Window (sec)<input id="entryWindow" type="number" step="5" value="${state.settings.entryWindowSec}"></label><button class="goldBtn" onclick="Z.saveSettings()">ذخیره تنظیمات</button></section><section class="panel"><div class="title">90% Validation Gate</div><label>Minimum Shadow Trades<input id="valN" type="number" step="10" value="${state.settings.validationMinTrades}"></label><label>Target WR<input id="valWR" type="number" step=".01" value="${state.settings.validationTargetWR}"></label><label>Minimum Profit Factor<input id="valPF" type="number" step=".1" value="${state.settings.validationMinPF}"></label><label>Max Drawdown (R)<input id="valDD" type="number" step=".5" value="${state.settings.validationMaxDD}"></label><button class="goldBtn" onclick="Z.saveSettings()">ذخیره Gate</button></section><section class="panel"><div class="title">نمایش Android</div><button class="${state.settings.keepScreenOn?'safeToggle':'dangerToggle'}" onclick="Z.toggleKeepScreen()">${state.settings.keepScreenOn?'🟢 صفحه هنگام کار روشن بماند':'⚪ خاموش‌شدن خودکار صفحه'}</button><p class="note">برای مانیتور زنده می‌توانید روشن‌ماندن صفحه را فعال نگه دارید؛ این گزینه روی مصرف باتری اثر دارد.</p></section><section class="panel"><div class="title">داده و پشتیبان</div><div class="toolbar"><button onclick="Z.export()">خروجی JSON</button><label class="file">ورود JSON<input id="imp" type="file" accept="application/json" onchange="Z.import(this)"></label><button onclick="Z.reset()">بازنشانی</button></div></section>${safety()}</main>${nav()}`;
+  return `<main>${header()}<section class="panel"><div class="title">Market Feed</div><label>Feed Mode<select id="feedMode"><option value="LIVE_WEB" ${state.feedMode==='LIVE_WEB'?'selected':''}>Online Live · Gold API</option><option value="SIMULATION" ${state.feedMode==='SIMULATION'?'selected':''}>Simulation Lab</option><option value="MT5_BRIDGE" ${state.feedMode==='MT5_BRIDGE'?'selected':''}>MT5 Bridge • Read Only</option></select></label><button class="goldBtn" onclick="Z.applyFeed()">اعمال Feed</button><p class="note">برای آمار واقعی Shadow باید MT5 Bridge فعال باشد. Simulation با Shadow مخلوط نمی‌شود.</p></section><section class="panel"><div class="title">MT5 Bridge • Personal</div><p class="note">Bridge روی کامپیوتری اجرا می‌شود که MetaTrader 5 روی آن باز و وارد حساب شده است. رمز حساب بروکر داخل اپ ذخیره نمی‌شود. Token در SharedPreferences بومی Android ذخیره می‌شود و WebView امکان خواندن آن را ندارد.</p><label>Bridge URL<input id="bridgeUrl" class="ltr" placeholder="http://192.168.1.20:8765"></label><label>Bearer Token<input id="bridgeToken" class="ltr" type="password" placeholder="اگر قبلاً ذخیره شده خالی بگذارید"></label><div class="systemList"><div class="systemItem"><b>Configured</b><span>${state.market.bridgeConfigured?'YES':'NO'}</span></div><div class="systemItem"><b>Token saved</b><span>${state.market.hasToken?'YES':'NO'}</span></div><div class="systemItem"><b>Status</b><span>${esc(state.market.status)}</span></div></div><div class="toolbar"><button class="goldBtn noMargin" onclick="Z.saveBridge()">ذخیره و تست</button><button onclick="Z.clearBridge()">پاک‌کردن Bridge</button></div><p class="mini">HTTP فقط برای localhost/LAN/Tailscale private range پذیرفته می‌شود. برای آدرس عمومی HTTPS لازم است.</p></section><section class="panel"><div class="title">Broker Adapter</div><div class="selectRow"><label>Broker<input value="Alpari" disabled></label><label>Platform<select id="platform"><option value="UNSET" ${state.broker.platform==='UNSET'?'selected':''}>بعداً تعیین می‌کنم</option><option value="MT4" ${state.broker.platform==='MT4'?'selected':''}>MetaTrader 4</option><option value="MT5" ${state.broker.platform==='MT5'?'selected':''}>MetaTrader 5</option></select></label></div><button class="goldBtn" onclick="Z.saveBroker()">ذخیره</button></section><section class="panel"><div class="title">AI Fusion Engine</div><button class="${state.ai.enabled?'safeToggle':'dangerToggle'}" onclick="Z.toggleAi()">${state.ai.enabled?'🧠 AI FUSION ON':'⚪ AI FUSION OFF'}</button><p class="note">در فید MT5، سیگنال فقط وقتی عبور می‌کند که AI و موتور تکنیکال هم‌جهت باشند. خاموش‌کردن AI برای تست مقایسه‌ای است.</p><label>Minimum AI Strength (0-100)<input id="minAiScore" type="number" min="40" max="100" step="1" value="${state.settings.minAiScore}"></label><label>AI Refresh (sec)<input id="aiRefresh" type="number" min="15" max="300" step="5" value="${state.settings.aiRefreshSec}"></label><button class="goldBtn" onclick="Z.saveSettings()">ذخیره AI Gates</button><div class="systemList"><div class="systemItem"><b>Decision</b><span>${esc(state.ai.decision)}</span></div><div class="systemItem"><b>Strength</b><span>${fmt(state.ai.strengthScore,0)}/100</span></div><div class="systemItem"><b>Status</b><span>${esc(state.ai.status)}</span></div></div></section><section class="panel"><div class="title">Safety / News</div><button class="${state.settings.newsLock?'dangerToggle':'safeToggle'}" onclick="Z.toggleNewsLock()">${state.settings.newsLock?'🔴 NEWS LOCK ON — ورود مسدود':'🟢 NEWS LOCK OFF'}</button><p class="note">قبل و هنگام اخبار پرقدرت طلا/دلار این قفل را دستی روشن کنید. نسخه v61 هنوز Economic Calendar خودکار ندارد.</p></section><section class="panel"><div class="title">Precision Gates</div><label>Minimum Setup Quality (0-100)<input id="minQuality" type="number" min="50" max="100" step="1" value="${state.settings.minQuality}"></label><label>Max Spread (price units)<input id="spread" type="number" step=".01" value="${state.settings.maxSpread}"></label><label>Min M5 ATR<input id="minAtr" type="number" step=".05" value="${state.settings.minAtr}"></label><label>Max M5 ATR<input id="maxAtr" type="number" step=".1" value="${state.settings.maxAtr}"></label><label>TP1 minimum R:R<input id="rr" type="number" step=".05" value="${state.settings.minRR}"></label><label>Planned Max Risk %<input id="risk" type="number" step=".05" value="${state.settings.maxRiskPct}"></label><label>Entry Window (sec)<input id="entryWindow" type="number" step="5" value="${state.settings.entryWindowSec}"></label><button class="goldBtn" onclick="Z.saveSettings()">ذخیره تنظیمات</button></section><section class="panel"><div class="title">90% Validation Gate</div><label>Minimum Shadow Trades<input id="valN" type="number" step="10" value="${state.settings.validationMinTrades}"></label><label>Target WR<input id="valWR" type="number" step=".01" value="${state.settings.validationTargetWR}"></label><label>Minimum Profit Factor<input id="valPF" type="number" step=".1" value="${state.settings.validationMinPF}"></label><label>Max Drawdown (R)<input id="valDD" type="number" step=".5" value="${state.settings.validationMaxDD}"></label><button class="goldBtn" onclick="Z.saveSettings()">ذخیره Gate</button></section><section class="panel"><div class="title">نمایش Android</div><button class="${state.settings.keepScreenOn?'safeToggle':'dangerToggle'}" onclick="Z.toggleKeepScreen()">${state.settings.keepScreenOn?'🟢 صفحه هنگام کار روشن بماند':'⚪ خاموش‌شدن خودکار صفحه'}</button><p class="note">برای مانیتور زنده می‌توانید روشن‌ماندن صفحه را فعال نگه دارید؛ این گزینه روی مصرف باتری اثر دارد.</p></section><section class="panel"><div class="title">داده و پشتیبان</div><div class="toolbar"><button onclick="Z.export()">خروجی JSON</button><label class="file">ورود JSON<input id="imp" type="file" accept="application/json" onchange="Z.import(this)"></label><button onclick="Z.reset()">بازنشانی</button></div></section>${safety()}</main>${nav()}`;
 }
 function prepareTrade(id){const x=state.history.find(s=>s.id===id);if(!x||x.status!=='SIGNAL'||!state.trade.confirm)return;state.trade.lastPrepared={at:new Date().toISOString(),broker:state.broker.name,platform:state.broker.platform,symbol:x.resolvedSymbol||x.symbol,direction:x.direction,entry:x.entry,sl:x.sl,tp1:x.tp1,tp2:x.tp2,tp3:x.tp3,status:'PREPARED_NOT_SENT'};state.audit.push({at:new Date().toISOString(),type:'TRADE_PREPARED_NOT_SENT',detail:state.trade.lastPrepared});save();native('toast','فقط آماده شد؛ هیچ سفارشی ارسال نشد.');render();}
 function saveSettings(){const n=id=>document.getElementById(id);if(n('minQuality'))state.settings.minQuality=Math.min(100,Math.max(50,+n('minQuality').value||90));if(n('spread'))state.settings.maxSpread=Math.max(.01,+n('spread').value||.35);if(n('minAtr'))state.settings.minAtr=Math.max(.01,+n('minAtr').value||.45);if(n('maxAtr'))state.settings.maxAtr=Math.max(state.settings.minAtr,+n('maxAtr').value||6);if(n('rr'))state.settings.minRR=Math.max(1,+n('rr').value||1.5);if(n('risk'))state.settings.maxRiskPct=Math.max(.05,+n('risk').value||.35);if(n('entryWindow'))state.settings.entryWindowSec=Math.max(15,+n('entryWindow').value||75);if(n('minAiScore'))state.settings.minAiScore=Math.min(100,Math.max(40,+n('minAiScore').value||72));if(n('aiRefresh'))state.settings.aiRefreshSec=Math.min(300,Math.max(15,+n('aiRefresh').value||30));if(n('valN'))state.settings.validationMinTrades=Math.max(30,+n('valN').value||200);if(n('valWR'))state.settings.validationTargetWR=Math.min(.99,Math.max(.5,+n('valWR').value||.9));if(n('valPF'))state.settings.validationMinPF=Math.max(1,+n('valPF').value||1.5);if(n('valDD'))state.settings.validationMaxDD=Math.max(1,+n('valDD').value||8);save();render();}
 function render(full=true){document.body.innerHTML=({home,signal,replay,journal,settings}[state.ui.tab]||home)();if(full)updateCountdown();}
 function updateCountdown(){const el=document.getElementById('countdown');if(el)el.textContent=countdownLeft>0?countdownLeft+'s':'—';}
-function restartTimers(){clearInterval(pollTimer);clearInterval(simTimer);clearInterval(aiTimer);if(state.feedMode==='MT5_BRIDGE'){pollTimer=setInterval(requestMarket,2200);if(state.ai.enabled)aiTimer=setInterval(requestAi,Math.max(15,state.settings.aiRefreshSec)*1000);}else simTimer=setInterval(simulationStep,3000);}
+function restartTimers(){clearInterval(pollTimer);clearInterval(simTimer);clearInterval(aiTimer);if(state.feedMode==='MT5_BRIDGE'){pollTimer=setInterval(requestMarket,2200);if(state.ai.enabled)aiTimer=setInterval(requestAi,Math.max(15,state.settings.aiRefreshSec)*1000);}else if(state.feedMode==='LIVE_WEB'){pollTimer=setInterval(pullLiveQuote,4000);aiTimer=setInterval(()=>{applyLocalAi();if(dataReady())cycle();},45000);simTimer=setInterval(()=>{if(frames.M1.length){const last=frames.M1.at(-1);evaluateOpenSignalsBar(last,false);}},8000);}else simTimer=setInterval(simulationStep,3000);}
 
 window.Z={
   tab:setTab,mode:setMode,cycle,onNativeReply,saveBridge,clearBridge,syncBars,testBridge:requestHealth,toggleNewsLock,toggleKeepScreen,saveBroker,
   aiNow:requestAi,toggleAi(){state.ai.enabled=!state.ai.enabled;if(!state.ai.enabled){state.ai.status='DISABLED';state.ai.decision='WAIT';}else if(state.feedMode==='MT5_BRIDGE'){state.ai.status='NOT_READY';requestAi();}save();restartTimers();render();},
-  applyFeed(){const v=document.getElementById('feedMode')?.value||'SIMULATION';setFeedMode(v);},
+  applyFeed(){const v=document.getElementById('feedMode')?.value||'LIVE_WEB';setFeedMode(v);},
   confirmTrade(v){state.trade.confirm=!!v;save();render();},prepareTrade,
   saveSettings,
   export(){const json=JSON.stringify({app:'Zarnegar Personal XAUUSD',version:'v61',exportedAt:new Date().toISOString(),state},null,2);const name=`zarnegar-v61-backup-${new Date().toISOString().slice(0,10)}.json`;try{if(AndroidBridge?.saveTextFile){AndroidBridge.saveTextFile(name,json);return;}}catch(_){}const blob=new Blob([json],{type:'application/json'});const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(a.href),1000);},
@@ -488,7 +622,7 @@ window.Z={
 };
 
 readBridgeConfig();
-if(state.feedMode==='SIMULATION')initSimulation();else{frames={M1:[],M5:[],M15:[],H1:[]};requestHealth();syncBars();setTimeout(requestAi,2500);}
+if(state.feedMode==='MT5_BRIDGE'){frames={M1:[],M5:[],M15:[],H1:[]};requestHealth();syncBars();setTimeout(requestAi,2500);}else{if(!frames.M5.length)initSimulation();applyLocalAi();if(state.feedMode==='LIVE_WEB')pullLiveQuote();}
 render();restartTimers();applyKeepScreen();
 countdownTimer=setInterval(()=>{if(countdownLeft>0){countdownLeft--;updateCountdown();}},1000);
 
