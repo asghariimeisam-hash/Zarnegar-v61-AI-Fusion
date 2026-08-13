@@ -2,6 +2,10 @@
 
 نسخه شخصی زرنگار برای XAUUSD با لایه پیش‌بینی پیشرفته و Shadow Validation.
 
+> **نسخه وب:** برای اجرای فوری در مرورگر (بدون Android/MetaTrader) فقط کافی است
+> `node server.js` را اجرا کنید و `http://localhost:8000` را باز کنید.
+> جزئیات در [`README-WEB-FA.md`](README-WEB-FA.md).
+
 ## معماری AI
 
 زرنگار v61 از یک معماری **Fusion** استفاده می‌کند، نه یک مدل واحد:
