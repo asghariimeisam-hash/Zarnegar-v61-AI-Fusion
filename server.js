@@ -446,17 +446,29 @@ function engineDecision(symbol) {
 /* ----------------------------------------------------------------------------
  * 5. Backtester — honest win rate / profit factor / drawdown
  *    Runs the same entry logic over simulated M15 history.
+ *
+ *    `rr`     = take-profit multiple (reward : risk).
+ *    `be`     = move the stop-loss to break-even after +be×R in profit.
+ *               This is a LEGITIMATE way to raise win rate (it converts some
+ *               losers into break-even) but it also cuts some winners short.
+ *
+ *    IMPORTANT: win rate and profit are trade-offs. A high win rate (90%+)
+ *    only happens with a tiny TP (e.g. risk 3 to win 1), which makes the
+ *    system LOSE money overall. The sweep below makes this visible.
  * ------------------------------------------------------------------------- */
-function backtest() {
+function runBacktest(opts = {}) {
   const m15 = market.barsFor('M15');
   const m5 = market.barsFor('M5');
   if (m15.length < 300) return null;
 
+  const rr = opts.rr != null ? opts.rr : 1.5;
+  const slMult = opts.slMult != null ? opts.slMult : 1.2;
+  const beR = opts.be != null ? opts.be : 0;
+  const maxBars = opts.maxBars != null ? opts.maxBars : 40;
+
   const trades = [];
   let equity = 0, peak = 0, maxDD = 0;
-
-  const rr = 1.5, slMult = 1.2;
-  let lastExitBar = -1; // enforce one position at a time
+  let lastExitBar = -1; // one position at a time
 
   for (let i = 240; i < m15.length - 8; i++) {
     if (i < lastExitBar) continue;
@@ -476,29 +488,33 @@ function backtest() {
     // volatility sweet-spot (avoid dead-quiet and blow-off markets)
     if (!(f.a15 >= 0.5 && f.a15 <= 8.0)) continue;
 
-    // Conservative execution: enter at the NEXT bar's open (no look-ahead,
-    // no hypothetical limit fills). This keeps the backtest honest.
-    const next = m15[i + 1];
-    const entry = next.o;
-
+    // Conservative execution: enter at the NEXT bar's open (no look-ahead).
+    const entry = m15[i + 1].o;
     const risk = f.a15 * slMult;
     const sl = d === 'BUY' ? entry - risk : entry + risk;
     const tp = d === 'BUY' ? entry + risk * rr : entry - risk * rr;
+    const bePrice = beR > 0 ? (d === 'BUY' ? entry + beR * risk : entry - beR * risk) : null;
 
     let result = null, r = 0, exitBar = i + 1;
-    for (let j = i + 1; j < Math.min(i + 40, m15.length); j++) {
+    let beArmed = false;
+    const end = Math.min(i + maxBars, m15.length);
+    for (let j = i + 1; j < end; j++) {
       const b = m15[j];
-      const hitSL = d === 'BUY' ? b.l <= sl : b.h >= sl;
+      const stop = beArmed ? entry : sl;
+      const hitSL = d === 'BUY' ? b.l <= stop : b.h >= stop;
       const hitTP = d === 'BUY' ? b.h >= tp : b.l <= tp;
+      const hitBE = !beArmed && bePrice != null && (d === 'BUY' ? b.h >= bePrice : b.l <= bePrice);
+
       if (hitSL && hitTP) { result = 'AMBIGUOUS'; r = 0; exitBar = j; break; }
       if (hitTP) { result = 'WIN'; r = rr; exitBar = j; break; }
-      if (hitSL) { result = 'LOSS'; r = -1; exitBar = j; break; }
+      if (hitSL) { result = beArmed ? 'BREAKEVEN' : 'LOSS'; r = beArmed ? 0 : -1; exitBar = j; break; }
+      if (hitBE) beArmed = true;
     }
     if (result === null) {
       result = 'EXPIRED';
-      const lastP = m15[Math.min(i + 40, m15.length) - 1].c;
+      const lastP = m15[end - 1].c;
       r = (lastP - entry) / risk * (d === 'BUY' ? 1 : -1);
-      exitBar = Math.min(i + 40, m15.length) - 1;
+      exitBar = end - 1;
     }
     if (result === 'AMBIGUOUS') continue;
 
@@ -509,22 +525,59 @@ function backtest() {
 
   const wins = trades.filter((t) => t.result === 'WIN').length;
   const losses = trades.filter((t) => t.result === 'LOSS').length;
+  const beCnt = trades.filter((t) => t.result === 'BREAKEVEN').length;
+  const expired = trades.filter((t) => t.result === 'EXPIRED').length;
   const n = trades.length;
-  const wr = n ? wins / n : null;
+  const decided = wins + losses;
+  // win rate over decided trades (standard); break-even/expired shown separately
+  const wr = decided ? wins / decided : null;
+  const wrAll = n ? wins / n : null;
   const grossWin = trades.filter((t) => t.r > 0).reduce((a, t) => a + t.r, 0);
   const grossLoss = Math.abs(trades.filter((t) => t.r < 0).reduce((a, t) => a + t.r, 0));
   const pf = grossLoss ? grossWin / grossLoss : (grossWin ? Infinity : null);
 
   return {
-    n, wins, losses, expired: trades.filter((t) => t.result === 'EXPIRED').length,
-    winRate: wr, profitFactor: pf, maxDrawdown: +maxDD.toFixed(2),
+    rr, beR, n, wins, losses, breakeven: beCnt, expired,
+    winRate: wr, winRateAll: wrAll, profitFactor: pf, maxDrawdown: +maxDD.toFixed(2),
     avgR: n ? +(equity / n).toFixed(3) : 0,
     note: 'Backtest on SIMULATED history. Not live performance; past results do not guarantee future results.',
   };
 }
 
-let backtestCache = null;
-function getBacktest() { if (!backtestCache) backtestCache = backtest(); return backtestCache; }
+// The default profile (balanced, profitable): TP 1.5R, no breakeven.
+function backtest() { return runBacktest({ rr: 1.5, be: 0 }); }
+
+// Sweep across TP sizes to make the win-rate vs. profit trade-off visible.
+function sweep() {
+  const configs = [
+    { label: 'TP 0.15R (بسیار نزدیک)', rr: 0.15, be: 0 },
+    { label: 'TP 0.2R', rr: 0.2, be: 0 },
+    { label: 'TP 0.3R', rr: 0.3, be: 0 },
+    { label: 'TP 0.5R', rr: 0.5, be: 0 },
+    { label: 'TP 0.75R', rr: 0.75, be: 0 },
+    { label: 'TP 1.0R (برابر)', rr: 1.0, be: 0 },
+    { label: 'TP 1.5R (پیش‌فرض)', rr: 1.5, be: 0 },
+    { label: 'TP 2.0R', rr: 2.0, be: 0 },
+    { label: 'TP 3.0R', rr: 3.0, be: 0 },
+    { label: 'TP 1.5R + BE 0.25', rr: 1.5, be: 0.25 },
+    { label: 'TP 1.5R + BE 0.5', rr: 1.5, be: 0.5 },
+    { label: 'TP 1.5R + BE 0.75', rr: 1.5, be: 0.75 },
+  ];
+  return configs.map((c) => ({ ...c, stats: runBacktest(c) }));
+}
+
+// The recommended profile: TP 1.5R + move stop to break-even after +0.25R.
+// This is the best all-round trade-off (higher win rate AND higher PF AND
+// lower drawdown) versus the plain TP-1.5R default.
+function recommended() { return runBacktest({ rr: 1.5, be: 0.25 }); }
+
+// Compute everything ONCE, deterministically, BEFORE live ticks start
+// mutating the market — so the numbers are reproducible on every reload.
+const STATS = {
+  backtest: backtest(),
+  recommended: recommended(),
+  sweep: sweep(),
+};
 
 /* ----------------------------------------------------------------------------
  * 6. HTTP server
@@ -602,7 +655,7 @@ function apiRoute(req, res, urlPath, query) {
   }
 
   if (urlPath === '/v1/stats') {
-    return sendJSON(res, 200, { ok: true, symbol, backtest: getBacktest() });
+    return sendJSON(res, 200, { ok: true, symbol, ...STATS });
   }
 
   return sendJSON(res, 404, { ok: false, error: 'NOT_FOUND' });

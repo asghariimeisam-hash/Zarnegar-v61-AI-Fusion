@@ -17,6 +17,7 @@
     requestMarket: (sym) => call('market', '/v1/market?symbol=' + encodeURIComponent(sym || 'XAUUSD')),
     requestBars: (sym, tf, count) => call('bars:' + tf, '/v1/bars?symbol=' + encodeURIComponent(sym || 'XAUUSD') + '&timeframe=' + tf + '&count=' + (count || 300)),
     requestAi: (sym) => call('ai', '/v1/ai?symbol=' + encodeURIComponent(sym || 'XAUUSD')),
+    requestStats: () => call('stats', '/v1/stats'),
     requestHealth: () => call('health', '/v1/health'),
     getBridgeConfig: () => JSON.stringify({ baseUrl: '/v1', hasToken: false }),
     configureBridge: () => true,
@@ -81,6 +82,7 @@ const DEF = {
     forecast: null,
     backtest: null
   },
+  stats: null,
   history: [], journal: [], audit: [],
   session: { startedAt: null, cycles: 0, signals: 0, noTrades: 0 },
   ui: { tab: 'home' },
@@ -426,7 +428,6 @@ function onAiReply(o){
   aiPending=false;
   state.ai.receivedAt=Date.now();
   if(!o||o.ok===false){state.ai.status='ERROR';state.ai.decision='WAIT';state.ai.strengthScore=0;state.ai.lastError=o?.error||'AI_ERROR';save();render(false);return;}
-  state.ai.status=o.status||'READY';
   state.ai.decision=['BUY','SELL','WAIT'].includes(o.decision)?o.decision:'WAIT';
   state.ai.strengthScore=Number.isFinite(+o.strength_score)?+o.strength_score:0;
   state.ai.agreement=Number.isFinite(+o.agreement)?+o.agreement:0;
@@ -444,10 +445,20 @@ function onAiReply(o){
   state.ai.backtest=o.backtest||null;
   save();render(false);
 }
+function requestStats(){
+  if(!hasNative())return;
+  try{AndroidBridge.requestStats();}catch(_){ }
+}
+function onStatsReply(o){
+  if(!o||o.ok===false)return;
+  state.stats=o;
+  save();render(false);
+}
 function onNativeReply(kind,payload){
   const o=parseReply(payload);
   if(kind==='market'){onMarketReply(o);return;}
   if(kind==='ai'){onAiReply(o);return;}
+  if(kind==='stats'){onStatsReply(o);return;}
   if(kind.startsWith('bars:')){onBarsReply(kind,o);return;}
   if(kind==='health'){
     if(o&&o.ok!==false){state.market.bridgeConfigured=true;state.market.status='BRIDGE_OK';state.broker.bridgeStatus='ONLINE';state.market.lastError=null;if(o.symbol)state.market.resolvedSymbol=o.symbol;}
@@ -505,13 +516,29 @@ function signalCard(x){
 }
 function tradeBox(x){return `<div class="confirmBox"><b>🔒 Real Execution در v61 غیرفعال است</b><p class="mini">این نسخه فقط سفارش را برای بررسی آماده می‌کند و هیچ درخواست معاملاتی به MT5 ارسال نمی‌کند.</p><label><input type="checkbox" ${state.trade.confirm?'checked':''} onchange="Z.confirmTrade(this.checked)"> مقادیر Entry / SL / TP را بررسی کردم</label><button class="tradeBtn" ${state.trade.confirm?'':'disabled'} onclick="Z.prepareTrade('${esc(x.id)}')">PREPARE ONLY</button></div>`;}
 function statBoard(){const sim=metrics('SIMULATION'),sh=metrics('SHADOW');return `<section class="panel"><div class="title"><span class="kicker">REALITY CHECK</span><span>WR جداگانه</span></div><div class="metricBoard"><div><small>SIM WR</small><b>${metricText(sim.wr,'pct')}</b><span>n=${sim.n}</span></div><div><small>SHADOW WR</small><b>${metricText(sh.wr,'pct')}</b><span>n=${sh.n}</span></div><div><small>SHADOW PF</small><b>${metricText(sh.pf)}</b><span>هدف ≥ ${fmt(state.settings.validationMinPF)}</span></div><div><small>SHADOW DD</small><b>${fmt(sh.maxDD,2)}R</b><span>سقف ${fmt(state.settings.validationMaxDD,1)}R</span></div></div></section>`;}
+function statsPanel(){
+  const st=state.stats;
+  if(!st)return '';
+  const rec=st.recommended, sw=st.sweep||[];
+  const rows=sw.map(r=>{
+    const s=r.stats; if(!s)return'';
+    const wr=s.winRate!=null?pct(s.winRate):'—';
+    const isRec=r.label.includes('BE 0.25');
+    const trap=s.winRate!=null&&s.winRate>=0.8;
+    return `<div class="sweepRow ${isRec?'rec':''} ${trap?'trap':''}"><span>${esc(r.label)}</span><b>${wr}</b><b>${metricText(s.profitFactor)}</b><b>${fmt(s.avgR,3)}R</b></div>`;
+  }).join('');
+  return `<section class="panel"><div class="title"><span class="kicker">وین‌ریت در برابر سود — صادقانه</span><span>SIMULATED</span></div>
+  <div class="metricBoard"><div><small>پیشنهادی WR</small><b>${rec&&rec.winRate!=null?pct(rec.winRate):'—'}</b><span>TP 1.5R + BE</span></div><div><small>PROFIT FACTOR</small><b>${rec?metricText(rec.profitFactor):'—'}</b><span>هدف ≥ 1.5</span></div><div><small>TRADES</small><b>${rec?rec.n:'—'}</b><span>sample</span></div><div><small>MAX DD</small><b>${rec?fmt(rec.maxDrawdown,1)+'R':'—'}</b><span>worst</span></div></div>
+  <div class="sweepHead"><span>پروفایل</span><b>WR</b><b>PF</b><b>Avg R</b></div><div class="sweepList">${rows}</div>
+  <p class="mini">وین‌ریت ۸۰–۹۰٪ فقط با هدف سود بسیار نزدیک ممکن است (سود هر معامله ~۰.۰۱R) که با کسر اسپرد/کمیسیون واقعی به ضرر تبدیل می‌شود. ستون Avg R یعنی «واقعاً در هر معامله چقدر می‌برید» — عدد بزرگ‌تر = سود واقعی بیشتر. بهترین تعادل، ردیف سبز (BE) است.</p></section>`;
+}
 function validationPanel(){const v=validation(),m=v.m;return `<section class="panel"><div class="validationLock ${v.pass?'good':''}"><div class="title"><span>90% Validation Gate</span><span>${v.pass?'REVIEW ELIGIBLE':'LOCKED'}</span></div><div class="systemList"><div class="systemItem"><b>Shadow sample</b><span>${m.n} / ≥ ${state.settings.validationMinTrades}</span></div><div class="systemItem"><b>Win rate</b><span>${metricText(m.wr,'pct')} / ≥ ${pct(state.settings.validationTargetWR)}</span></div><div class="systemItem"><b>Profit Factor</b><span>${metricText(m.pf)} / ≥ ${fmt(state.settings.validationMinPF)}</span></div><div class="systemItem"><b>Max Drawdown</b><span>${fmt(m.maxDD,2)}R / ≤ ${fmt(state.settings.validationMaxDD,1)}R</span></div></div></div></section>`;}
 function chart(){const b=frames.M5.slice(-120);if(b.length<2)return'<div class="empty">داده نمودار هنوز آماده نیست</div>';const w=680,h=250,pad=18,min=Math.min(...b.map(x=>x.l)),max=Math.max(...b.map(x=>x.h));const pts=b.map((x,i)=>`${pad+i*(w-2*pad)/(b.length-1)},${h-pad-(x.c-min)/(max-min||1)*(h-2*pad)}`).join(' ');return `<svg viewBox="0 0 ${w} ${h}" preserveAspectRatio="none"><path class="grid" d="M0 60H680M0 125H680M0 190H680"/><polyline points="${pts}" class="line"/></svg>`;}
 function row(x){const r=x.resolution?.result||'OPEN';return `<div class="row"><div><b>${x.status==='SIGNAL'?x.direction:'NO TRADE'}</b><small>${new Date(x.timestamp).toLocaleTimeString('fa-IR')} • Q${fmt(x.quality,0)} • ${esc(r)}</small></div><strong>${fmt(x.price)}</strong><span>${esc(x.source)}</span></div>`;}
 function safety(){return `<div class="safety"><b>🔒 اصل نسخه v61 AI Fusion</b><span>Chronos‑2 و TimesFM فقط لایه پیش‌بینی‌اند؛ AI Strength احتمال برد نیست. هدف ۹۰٪ فقط Gate ارزیابی است و تضمین نیست. اجرای واقعی سفارش همچنان غیرفعال است تا Shadow/Forward Validation کافی انجام شود.</span></div>`;}
 function nav(){return `<nav>${[['home','⌂','خانه'],['signal','◆','سیگنال'],['replay','◫','اعتبارسنجی'],['journal','☷','ژورنال'],['settings','⚙','تنظیمات']].map(x=>`<button class="${state.ui.tab===x[0]?'active':''}" onclick="Z.tab('${x[0]}')"><span>${x[1]}</span>${x[2]}</button>`).join('')}</nav>`;}
 
-function home(){const recent=state.history.slice(-6).reverse();return `<main>${header()}${modeSwitch()}${brokerStrip()}<div class="targetNotice">🧠 v61 AI Fusion: دو مدل مستقل (Trend Fusion + Momentum/Mean-Rev) با فیلتر Regime و Consensus. اختلاف مدل‌ها یا ضعف شرایط بازار = WAIT / NO TRADE. اجرای واقعی سفارش غیرفعال است.</div>${feedPanel()}${aiPanel()}<section class="quick"><div><small>SCANS</small><b>${state.session.cycles}</b><span>cycles</span></div><div><small>SIGNALS</small><b>${state.session.signals}</b><span>A+ only</span></div><div><small>NO TRADE</small><b>${state.session.noTrades}</b><span>filtered</span></div><div><small>RISK</small><b>${fmt(state.settings.maxRiskPct,2)}%</b><span>planned max</span></div></section>${signalCard(lastCycle)}${statBoard()}${validationPanel()}<section class="panel"><div class="title"><span class="kicker">M5 MARKET MONITOR</span><span>${frames.M5.length} bars</span></div><div class="chart">${chart()}</div></section><section class="panel"><div class="title"><span class="kicker">SIGNAL TAPE</span><span>${recent.length} مورد</span></div>${recent.length?recent.map(row).join(''):'<div class="empty">رکوردی وجود ندارد</div>'}</section>${safety()}</main>${nav()}`;}
+function home(){const recent=state.history.slice(-6).reverse();return `<main>${header()}${modeSwitch()}${brokerStrip()}<div class="targetNotice">🧠 v61 AI Fusion: دو مدل مستقل (Trend Fusion + Momentum/Mean-Rev) با فیلتر Regime و Consensus. اختلاف مدل‌ها یا ضعف شرایط بازار = WAIT / NO TRADE. اجرای واقعی سفارش غیرفعال است.</div>${feedPanel()}${aiPanel()}${statsPanel()}<section class="quick"><div><small>SCANS</small><b>${state.session.cycles}</b><span>cycles</span></div><div><small>SIGNALS</small><b>${state.session.signals}</b><span>A+ only</span></div><div><small>NO TRADE</small><b>${state.session.noTrades}</b><span>filtered</span></div><div><small>RISK</small><b>${fmt(state.settings.maxRiskPct,2)}%</b><span>planned max</span></div></section>${signalCard(lastCycle)}${statBoard()}${validationPanel()}<section class="panel"><div class="title"><span class="kicker">M5 MARKET MONITOR</span><span>${frames.M5.length} bars</span></div><div class="chart">${chart()}</div></section><section class="panel"><div class="title"><span class="kicker">SIGNAL TAPE</span><span>${recent.length} مورد</span></div>${recent.length?recent.map(row).join(''):'<div class="empty">رکوردی وجود ندارد</div>'}</section>${safety()}</main>${nav()}`;}
 function signal(){return `<main>${header()}${modeSwitch()}${feedPanel()}${aiPanel()}${signalCard(lastCycle)}<section class="panel"><div class="title">منطق MTF Precision</div><ul class="rules"><li>جهت اصلی از H1 EMA20/50 تعیین می‌شود.</li><li>M15 باید هم‌جهت باشد و Momentum/RSI محدوده A+ را پاس کند.</li><li>M5 برای ساختار Entry و ATR استفاده می‌شود.</li><li>Spread و تازگی Tick Gate مستقل دارند.</li><li>قفل خبر مهم دستی است و هنگام خبرهای پرریسک باید فعال شود.</li><li>Quality احتمال برد نیست.</li></ul></section>${validationPanel()}${safety()}</main>${nav()}`;}
 function replay(){const h=state.history.slice().reverse();return `<main>${header()}${statBoard()}${validationPanel()}<section class="panel"><div class="title">History / Forward Validation <span>${h.length} records</span></div><div class="toolbar"><button onclick="Z.export()">Export JSON</button><button onclick="Z.clearHistory()">پاک‌سازی</button></div>${h.length?h.slice(0,160).map(row).join(''):'<div class="empty">داده‌ای وجود ندارد</div>'}</section>${safety()}</main>${nav()}`;}
 function journal(){return `<main>${header()}<section class="panel"><div class="title">ژورنال شخصی</div><textarea id="jn" placeholder="Context بازار، خبر، دلیل ورود/عدم ورود، خطاها و نکته‌ها..."></textarea><div class="toolbar"><button class="goldBtn noMargin" onclick="Z.note()">ثبت یادداشت</button></div>${state.journal.slice().reverse().slice(0,100).map(x=>`<div class="journal"><b>${esc(x.tag)}</b><small>${new Date(x.at).toLocaleString('fa-IR')}</small><p>${esc(x.note)}</p></div>`).join('')}</section>${safety()}</main>${nav()}`;}
@@ -539,6 +566,7 @@ window.Z={
 
 readBridgeConfig();
 if(state.feedMode==='SIMULATION')initSimulation();else{frames={M1:[],M5:[],M15:[],H1:[]};requestHealth();syncBars();setTimeout(requestAi,2500);}
+requestStats();
 render();restartTimers();applyKeepScreen();
 countdownTimer=setInterval(()=>{if(countdownLeft>0){countdownLeft--;updateCountdown();}},1000);
 
